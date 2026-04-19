@@ -1,0 +1,29 @@
+{
+	admin off
+	http_port 80
+	https_port {$PANEL_HTTPS_PORT}
+}
+
+https://{$PANEL_DOMAIN}:{$PANEL_HTTPS_PORT} {
+	encode zstd gzip
+
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+		X-Content-Type-Options nosniff
+		X-Frame-Options SAMEORIGIN
+		Referrer-Policy no-referrer
+		-Server
+	}
+
+	@panel path /{$PANEL_WEB_BASE_PATH}*
+	handle @panel {
+		reverse_proxy 127.0.0.1:{$PANEL_INTERNAL_PORT}
+	}
+
+	@sub path /{$SUBSCRIPTION_PATH}*
+	handle @sub {
+		reverse_proxy 127.0.0.1:{$PANEL_SUBSCRIPTION_INTERNAL_PORT}
+	}
+
+	respond "Not found" 404
+}

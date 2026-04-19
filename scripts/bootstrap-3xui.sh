@@ -5,15 +5,20 @@ log() {
   printf '[bootstrap] %s\n' "$*"
 }
 
+trim_slashes() {
+  value="${1:-}"
+  value="${value#/}"
+  value="${value%/}"
+  printf '%s' "$value"
+}
+
 normalize_base_path() {
-  path="${1:-}"
+  path="$(trim_slashes "${1:-}")"
   if [ -z "$path" ] || [ "$path" = "/" ]; then
     printf ''
     return
   fi
-  path="/${path#/}"
-  path="${path%/}"
-  printf '%s' "$path"
+  printf '/%s' "$path"
 }
 
 random_hex() {
@@ -34,11 +39,151 @@ build_string_array() {
     | jq -Rsc 'split("\n") | map(select(length > 0))'
 }
 
+set_panel_endpoints() {
+  PANEL_ROOT="${1%/}"
+  LOGIN_URL="${PANEL_ROOT}/login"
+  API_ROOT="${PANEL_ROOT}/panel/api"
+  SETTING_ROOT="${PANEL_ROOT}/panel/setting"
+}
+
+wait_for_any_root() {
+  roots="$1"
+  tries=0
+  while :; do
+    old_ifs="${IFS}"
+    IFS='
+'
+    for root in ${roots}; do
+      if [ -n "${root}" ] && curl -fsSL "${root%/}/" >/dev/null 2>&1; then
+        printf '%s' "${root%/}"
+        IFS="${old_ifs}"
+        return 0
+      fi
+    done
+    IFS="${old_ifs}"
+    if [ "${tries}" -ge 60 ]; then
+      return 1
+    fi
+    tries=$((tries + 1))
+    sleep 2
+  done
+}
+
+login_panel() {
+  login_payload="$(jq -nc \
+    --arg username "${PANEL_USERNAME}" \
+    --arg password "${PANEL_PASSWORD}" \
+    '{username: $username, password: $password}')"
+
+  login_response="$(curl -fsS \
+    -c "${COOKIE_JAR}" \
+    -H 'Content-Type: application/json' \
+    -d "${login_payload}" \
+    "${LOGIN_URL}")"
+
+  if ! printf '%s' "${login_response}" | jq -e '(.success // true) == true' >/dev/null; then
+    return 1
+  fi
+  return 0
+}
+
+compose_public_origin() {
+  scheme="$1"
+  host="$2"
+  port="$3"
+  origin="${scheme}://${host}"
+  if [ -z "${port}" ]; then
+    printf '%s' "${origin}"
+  elif [ "${scheme}" = "http" ] && [ "${port}" = "80" ]; then
+    printf '%s' "${origin}"
+  elif [ "${scheme}" = "https" ] && [ "${port}" = "443" ]; then
+    printf '%s' "${origin}"
+  else
+    printf '%s:%s' "${origin}" "${port}"
+  fi
+}
+
+configure_secure_panel() {
+  if [ "${ENABLE_SECURE_PANEL}" != "true" ]; then
+    return
+  fi
+
+  secure_public_origin="$(compose_public_origin "${PANEL_PUBLIC_SCHEME}" "${PANEL_DOMAIN}" "${PANEL_HTTPS_PORT}")"
+  secure_panel_path="${PANEL_WEB_BASE_PATH}"
+  secure_sub_path="${SUBSCRIPTION_PATH}"
+  secure_panel_url="${secure_public_origin}${secure_panel_path}/"
+  secure_sub_url="${secure_public_origin}${secure_sub_path}/"
+
+  log "querying current panel settings"
+  settings_response="$(curl -fsS -b "${COOKIE_JAR}" -X POST "${SETTING_ROOT}/all")"
+  if ! printf '%s' "${settings_response}" | jq -e '(.success // true) == true' >/dev/null; then
+    log "failed to query panel settings"
+    printf '%s\n' "${settings_response}" > "${OUTPUT_DIR}/bootstrap-settings-error.json"
+    exit 1
+  fi
+
+  current_settings="$(printf '%s' "${settings_response}" | jq -c '.obj')"
+  desired_settings="$(printf '%s' "${current_settings}" | jq -c \
+    --arg webDomain "${PANEL_DOMAIN}" \
+    --argjson webPort "${PANEL_INTERNAL_PORT}" \
+    --arg webBasePath "${secure_panel_path}" \
+    --arg subDomain "${PANEL_DOMAIN}" \
+    --argjson subPort "${PANEL_SUBSCRIPTION_INTERNAL_PORT}" \
+    --arg subPath "${secure_sub_path}" \
+    --arg subURI "${secure_sub_url}" \
+    --arg subSupportUrl "${secure_panel_url}" \
+    '.webDomain = $webDomain
+    | .webPort = $webPort
+    | .webBasePath = $webBasePath
+    | .subDomain = $subDomain
+    | .subPort = $subPort
+    | .subPath = $subPath
+    | .subURI = $subURI
+    | .subSupportUrl = $subSupportUrl
+    | .subEnable = true')"
+
+  current_secure_subset="$(printf '%s' "${current_settings}" | jq -c '{webDomain, webPort, webBasePath, subDomain, subPort, subPath, subURI, subSupportUrl, subEnable}')"
+  desired_secure_subset="$(printf '%s' "${desired_settings}" | jq -c '{webDomain, webPort, webBasePath, subDomain, subPort, subPath, subURI, subSupportUrl, subEnable}')"
+
+  if [ "${current_secure_subset}" = "${desired_secure_subset}" ]; then
+    log "secure panel settings already match target configuration"
+    return
+  fi
+
+  log "applying secure panel settings for ${PANEL_DOMAIN}"
+  update_response="$(curl -fsS \
+    -b "${COOKIE_JAR}" \
+    -H 'Content-Type: application/json' \
+    -d "${desired_settings}" \
+    "${SETTING_ROOT}/update")"
+
+  if ! printf '%s' "${update_response}" | jq -e '(.success // true) == true' >/dev/null; then
+    log "failed to update secure panel settings"
+    printf '%s\n' "${update_response}" > "${OUTPUT_DIR}/bootstrap-settings-update-error.json"
+    exit 1
+  fi
+
+  curl -fsS -b "${COOKIE_JAR}" -X POST "${SETTING_ROOT}/restartPanel" >/dev/null 2>&1 || true
+  rm -f "${COOKIE_JAR}"
+
+  secure_internal_root="http://127.0.0.1:${PANEL_INTERNAL_PORT}${secure_panel_path}"
+  log "waiting for secured panel to restart at ${secure_internal_root}/"
+  secure_root="$(wait_for_any_root "${secure_internal_root}")" || {
+    log "secured panel did not become ready in time"
+    exit 1
+  }
+
+  set_panel_endpoints "${secure_root}"
+  login_panel || {
+    log "panel login failed after secure settings update"
+    exit 1
+  }
+  log "secure panel settings applied"
+}
+
 PANEL_API_BASE="${PANEL_API_BASE:-http://127.0.0.1:2053}"
-PANEL_WEB_BASE_PATH="$(normalize_base_path "${PANEL_WEB_BASE_PATH:-}")"
-PANEL_ROOT="${PANEL_API_BASE%/}${PANEL_WEB_BASE_PATH}"
-LOGIN_URL="${PANEL_ROOT}/login"
-API_ROOT="${PANEL_ROOT}/panel/api"
+PANEL_WEB_BASE_PATH_RAW="$(trim_slashes "${PANEL_WEB_BASE_PATH:-}")"
+PANEL_WEB_BASE_PATH="$(normalize_base_path "${PANEL_WEB_BASE_PATH_RAW}")"
 COOKIE_JAR="/tmp/3xui.cookies"
 
 PANEL_USERNAME="${PANEL_USERNAME:-admin}"
@@ -51,6 +196,13 @@ REALITY_DEST="${REALITY_DEST:-www.microsoft.com:443}"
 REALITY_SERVER_NAMES="${REALITY_SERVER_NAMES:-www.microsoft.com,dl.google.com,www.apple.com,gateway.icloud.com}"
 REALITY_FINGERPRINT="${REALITY_FINGERPRINT:-chrome}"
 REALITY_SPIDER_X="${REALITY_SPIDER_X:-/}"
+PANEL_DOMAIN="${PANEL_DOMAIN:-}"
+PANEL_HTTPS_PORT="${PANEL_HTTPS_PORT:-8443}"
+PANEL_INTERNAL_PORT="${PANEL_INTERNAL_PORT:-2053}"
+PANEL_SUBSCRIPTION_INTERNAL_PORT="${PANEL_SUBSCRIPTION_INTERNAL_PORT:-2096}"
+SUBSCRIPTION_PATH_RAW="$(trim_slashes "${SUBSCRIPTION_PATH:-}")"
+SUBSCRIPTION_PATH="$(normalize_base_path "${SUBSCRIPTION_PATH_RAW}")"
+PANEL_PUBLIC_SCHEME="${PANEL_PUBLIC_SCHEME:-https}"
 
 OUTPUT_DIR="/output/client"
 mkdir -p "${OUTPUT_DIR}"
@@ -62,35 +214,33 @@ case "${VLESS_PORT}" in
     ;;
 esac
 
-log "waiting for 3x-ui at ${PANEL_ROOT}/"
-tries=0
-until curl -fsSL "${PANEL_ROOT}/" >/dev/null 2>&1; do
-  tries=$((tries + 1))
-  if [ "${tries}" -ge 60 ]; then
-    log "3x-ui did not become ready in time"
-    exit 1
-  fi
-  sleep 2
-done
-
-login_payload="$(jq -nc \
-  --arg username "${PANEL_USERNAME}" \
-  --arg password "${PANEL_PASSWORD}" \
-  '{username: $username, password: $password}')"
-
-login_response="$(curl -fsS \
-  -c "${COOKIE_JAR}" \
-  -H 'Content-Type: application/json' \
-  -d "${login_payload}" \
-  "${LOGIN_URL}")"
-
-if ! printf '%s' "${login_response}" | jq -e '(.success // true) == true' >/dev/null; then
-  log "panel login failed"
-  printf '%s\n' "${login_response}" > "${OUTPUT_DIR}/bootstrap-login-error.json"
-  exit 1
+ENABLE_SECURE_PANEL="false"
+if [ -n "${PANEL_DOMAIN}" ] && [ -n "${PANEL_WEB_BASE_PATH_RAW}" ] && [ -n "${SUBSCRIPTION_PATH_RAW}" ]; then
+  ENABLE_SECURE_PANEL="true"
 fi
 
+candidate_roots="$(printf '%s\n' \
+  "http://127.0.0.1:${PANEL_INTERNAL_PORT}${PANEL_WEB_BASE_PATH}" \
+  "${PANEL_API_BASE%/}${PANEL_WEB_BASE_PATH}" \
+  "${PANEL_API_BASE%/}" \
+  "http://127.0.0.1:2053")"
+
+log "waiting for 3x-ui panel"
+selected_root="$(wait_for_any_root "${candidate_roots}")" || {
+  log "3x-ui did not become ready in time"
+  exit 1
+}
+
+set_panel_endpoints "${selected_root}"
+
+login_panel || {
+  log "panel login failed"
+  exit 1
+}
+
 log "logged in to 3x-ui API"
+
+configure_secure_panel
 
 inbounds_response="$(curl -fsS -b "${COOKIE_JAR}" "${API_ROOT}/inbounds/list")"
 if ! printf '%s' "${inbounds_response}" | jq -e '(.success // true) == true' >/dev/null; then
@@ -258,6 +408,15 @@ vless_uri="vless://${vless_uuid}@${OUTPUT_HOST}:${VLESS_PORT}?type=tcp&security=
 
 printf '%s\n' "${vless_uri}" > "${OUTPUT_DIR}/vless-uri.txt"
 
+if [ "${ENABLE_SECURE_PANEL}" = "true" ]; then
+  public_origin="$(compose_public_origin "${PANEL_PUBLIC_SCHEME}" "${PANEL_DOMAIN}" "${PANEL_HTTPS_PORT}")"
+  public_panel_url="${public_origin}${PANEL_WEB_BASE_PATH}/"
+  public_subscription_base="${public_origin}${SUBSCRIPTION_PATH}/"
+else
+  public_panel_url="${PANEL_ROOT}/"
+  public_subscription_base=""
+fi
+
 jq -n \
   --arg host "${OUTPUT_HOST}" \
   --argjson port "${VLESS_PORT}" \
@@ -270,6 +429,8 @@ jq -n \
   --arg fingerprint "${fingerprint}" \
   --arg spiderX "${spider_x}" \
   --arg dest "${dest_value}" \
+  --arg panelUrl "${public_panel_url}" \
+  --arg subscriptionBase "${public_subscription_base}" \
   --argjson serverNames "${server_names_pretty}" \
   --argjson shortIds "${short_ids_pretty}" \
   '{
@@ -287,8 +448,24 @@ jq -n \
       dest: $dest,
       serverNames: $serverNames,
       shortIds: $shortIds
+    },
+    panel: {
+      url: $panelUrl,
+      subscriptionBase: $subscriptionBase
     }
   }' > "${OUTPUT_DIR}/connection-info.json"
+
+jq -n \
+  --arg internalPanelRoot "${PANEL_ROOT}" \
+  --arg publicPanelUrl "${public_panel_url}" \
+  --arg publicSubscriptionBase "${public_subscription_base}" \
+  --arg secureDomainMode "${ENABLE_SECURE_PANEL}" \
+  '{
+    internalPanelRoot: $internalPanelRoot,
+    publicPanelUrl: $publicPanelUrl,
+    publicSubscriptionBase: $publicSubscriptionBase,
+    secureDomainMode: ($secureDomainMode == "true")
+  }' > "${OUTPUT_DIR}/panel-info.json"
 
 cat > "${OUTPUT_DIR}/IMPORT-NOTES.txt" <<EOF
 1. Import output/client/vless-uri.txt into your client.
@@ -297,7 +474,9 @@ cat > "${OUTPUT_DIR}/IMPORT-NOTES.txt" <<EOF
 4. For v2rayN/v2rayNG, import templates/v2rayn-routing-custom.json.
 5. Keep Russian services in direct route and the rest through proxy.
 
-Panel URL: ${PANEL_ROOT}/
+Internal panel URL: ${PANEL_ROOT}/
+Public panel URL: ${public_panel_url}
+Public subscription base: ${public_subscription_base}
 Panel credentials used by bootstrap: ${PANEL_USERNAME} / ${PANEL_PASSWORD}
 Remember to change admin credentials after first login.
 EOF

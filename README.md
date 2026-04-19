@@ -24,6 +24,8 @@
 
 Для текущей конфигурации достаточно публичного IP вашего VPS.
 
+Если домен уже есть, проект умеет поднять отдельный HTTPS-вход для панели и подписок через `Caddy` с автоматическим выпуском и продлением сертификата. Подробности: [docs/panel-domain-ssl.md](docs/panel-domain-ssl.md)
+
 ## Быстрый старт
 
 1. Скопируйте `.env.example` в `.env`.
@@ -52,6 +54,25 @@ docker compose logs rules-sync --tail=50
 
 7. Актуальные routing-файлы появятся в `output/rules/`.
 
+## Режим с доменом и SSL
+
+Если хотите убрать предупреждения панели про небезопасный доступ, используйте профиль `secure-panel`:
+
+```bash
+docker compose pull
+docker compose --profile secure-panel up -d
+```
+
+Перед этим заполните в `.env`:
+
+- `PANEL_DOMAIN`
+- `PANEL_WEB_BASE_PATH`
+- `SUBSCRIPTION_PATH`
+- `PANEL_INTERNAL_PORT`
+- `PANEL_HTTPS_PORT`
+
+Подробная инструкция: [docs/panel-domain-ssl.md](docs/panel-domain-ssl.md)
+
 ## Как использовать клиент
 
 Базовый путь для `v2rayN` / `v2rayNG`:
@@ -79,6 +100,7 @@ docker compose logs rules-sync --tail=50
 - `templates/xray-routing-snippet.json` — routing-snippet для клиентов с raw Xray config
 - `docs/architecture.md` — принятые решения
 - `docs/client-routing.md` — подключение клиентской части
+- `docs/panel-domain-ssl.md` — домен, HTTPS и автообновление сертификата
 - `docs/sources.md` — изученные источники и что взято из них
 
 ## Что проверим позже на вашем сервере

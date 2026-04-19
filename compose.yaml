@@ -16,6 +16,22 @@ services:
       - ./data/cert:/root/cert/
       - ./output:/output
 
+  caddy:
+    image: caddy:2.10-alpine
+    container_name: vpn-panel-proxy
+    restart: unless-stopped
+    network_mode: host
+    profiles:
+      - secure-panel
+    depends_on:
+      - 3x-ui
+    env_file:
+      - .env
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./data/caddy:/data
+      - ./data/caddy_config:/config
+
   bootstrap:
     image: alpine:3.20
     container_name: vpn-bootstrap

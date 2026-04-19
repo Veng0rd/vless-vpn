@@ -1,7 +1,11 @@
 .env
 data/db/*
 data/cert/*
+data/caddy/*
+data/caddy_config/*
 output/client/*
 output/rules/*
 !output/client/.gitkeep
 !output/rules/.gitkeep
+!data/caddy/.gitkeep
+!data/caddy_config/.gitkeep
