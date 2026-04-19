@@ -1,0 +1,7 @@
+.env
+data/db/*
+data/cert/*
+output/client/*
+output/rules/*
+!output/client/.gitkeep
+!output/rules/.gitkeep

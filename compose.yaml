@@ -1,0 +1,48 @@
+name: vless-reality-stack
+
+services:
+  3x-ui:
+    image: ${THREEXUI_IMAGE:-ghcr.io/mhsanaei/3x-ui:v2.8.11}
+    container_name: vpn-3x-ui
+    restart: unless-stopped
+    network_mode: host
+    tty: true
+    environment:
+      TZ: ${TZ:-Europe/Amsterdam}
+      XRAY_VMESS_AEAD_FORCED: "false"
+      XUI_ENABLE_FAIL2BAN: "true"
+    volumes:
+      - ./data/db:/etc/x-ui/
+      - ./data/cert:/root/cert/
+      - ./output:/output
+
+  bootstrap:
+    image: alpine:3.20
+    container_name: vpn-bootstrap
+    restart: "no"
+    network_mode: host
+    depends_on:
+      - 3x-ui
+    env_file:
+      - .env
+    volumes:
+      - ./scripts:/scripts:ro
+      - ./output:/output
+    entrypoint:
+      - /bin/sh
+      - -c
+      - apk add --no-cache curl jq >/dev/null && /bin/sh /scripts/bootstrap-3xui.sh
+
+  rules-sync:
+    image: alpine:3.20
+    container_name: vpn-rules-sync
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      - ./scripts:/scripts:ro
+      - ./output:/output
+    entrypoint:
+      - /bin/sh
+      - -c
+      - apk add --no-cache curl >/dev/null && /bin/sh /scripts/sync-routing-rules.sh

@@ -1,0 +1,58 @@
+[
+  {
+    "outboundTag": "direct",
+    "protocol": [
+      "bittorrent"
+    ],
+    "enabled": true,
+    "remarks": "Торренты напрямую"
+  },
+  {
+    "outboundTag": "direct",
+    "ip": [
+      "geoip:private"
+    ],
+    "enabled": true,
+    "remarks": "Приватные сети напрямую"
+  },
+  {
+    "outboundTag": "direct",
+    "domain": [
+      "geosite:private"
+    ],
+    "enabled": true,
+    "remarks": "Приватные домены напрямую"
+  },
+  {
+    "outboundTag": "direct",
+    "domain": [
+      "geosite:ru-available-only-inside"
+    ],
+    "enabled": true,
+    "remarks": "Сервисы, доступные только внутри РФ, напрямую"
+  },
+  {
+    "outboundTag": "direct",
+    "ip": [
+      "geoip:ru"
+    ],
+    "enabled": true,
+    "remarks": "Российские IP напрямую"
+  },
+  {
+    "outboundTag": "direct",
+    "domain": [
+      "regexp:.*\\.ru$",
+      "regexp:.*\\.su$",
+      "regexp:.*\\.xn--p1ai$"
+    ],
+    "enabled": true,
+    "remarks": "Российские доменные зоны напрямую"
+  },
+  {
+    "port": "0-65535",
+    "outboundTag": "proxy",
+    "enabled": true,
+    "remarks": "Всё остальное через VPN"
+  }
+]
