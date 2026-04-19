@@ -87,6 +87,46 @@ login_panel() {
   return 0
 }
 
+query_settings_json() {
+  curl -fsS -b "${COOKIE_JAR}" -X POST "${SETTING_ROOT}/all"
+}
+
+switch_root_and_login() {
+  root="$1"
+  rm -f "${COOKIE_JAR}"
+  set_panel_endpoints "${root}"
+  login_panel
+}
+
+resolve_settings_root() {
+  fallback_roots="$1"
+
+  settings_response="$(query_settings_json 2>/dev/null || true)"
+  if [ -n "${settings_response}" ] && printf '%s' "${settings_response}" | jq -e '(.success // true) == true' >/dev/null 2>&1; then
+    printf '%s' "${PANEL_ROOT}"
+    return 0
+  fi
+
+  old_ifs="${IFS}"
+  IFS='
+'
+  for root in ${fallback_roots}; do
+    if [ -z "${root}" ] || [ "${root}" = "${PANEL_ROOT}" ]; then
+      continue
+    fi
+    if switch_root_and_login "${root}" >/dev/null 2>&1; then
+      settings_response="$(query_settings_json 2>/dev/null || true)"
+      if [ -n "${settings_response}" ] && printf '%s' "${settings_response}" | jq -e '(.success // true) == true' >/dev/null 2>&1; then
+        IFS="${old_ifs}"
+        printf '%s' "${PANEL_ROOT}"
+        return 0
+      fi
+    fi
+  done
+  IFS="${old_ifs}"
+  return 1
+}
+
 compose_public_origin() {
   scheme="$1"
   host="$2"
@@ -115,12 +155,19 @@ configure_secure_panel() {
   secure_sub_url="${secure_public_origin}${secure_sub_path}/"
 
   log "querying current panel settings"
-  settings_response="$(curl -fsS -b "${COOKIE_JAR}" -X POST "${SETTING_ROOT}/all")"
-  if ! printf '%s' "${settings_response}" | jq -e '(.success // true) == true' >/dev/null; then
+  fallback_roots="$(printf '%s\n' \
+    "${PANEL_API_BASE%/}" \
+    "http://127.0.0.1:2053" \
+    "http://127.0.0.1:${PANEL_INTERNAL_PORT}")"
+
+  if ! resolved_root="$(resolve_settings_root "${fallback_roots}")"; then
     log "failed to query panel settings"
-    printf '%s\n' "${settings_response}" > "${OUTPUT_DIR}/bootstrap-settings-error.json"
+    if [ -n "${settings_response:-}" ]; then
+      printf '%s\n' "${settings_response}" > "${OUTPUT_DIR}/bootstrap-settings-error.json"
+    fi
     exit 1
   fi
+  set_panel_endpoints "${resolved_root}"
 
   current_settings="$(printf '%s' "${settings_response}" | jq -c '.obj')"
   desired_settings="$(printf '%s' "${current_settings}" | jq -c \
@@ -220,10 +267,11 @@ if [ -n "${PANEL_DOMAIN}" ] && [ -n "${PANEL_WEB_BASE_PATH_RAW}" ] && [ -n "${SU
 fi
 
 candidate_roots="$(printf '%s\n' \
-  "http://127.0.0.1:${PANEL_INTERNAL_PORT}${PANEL_WEB_BASE_PATH}" \
-  "${PANEL_API_BASE%/}${PANEL_WEB_BASE_PATH}" \
   "${PANEL_API_BASE%/}" \
-  "http://127.0.0.1:2053")"
+  "http://127.0.0.1:2053" \
+  "http://127.0.0.1:${PANEL_INTERNAL_PORT}" \
+  "${PANEL_API_BASE%/}${PANEL_WEB_BASE_PATH}" \
+  "http://127.0.0.1:${PANEL_INTERNAL_PORT}${PANEL_WEB_BASE_PATH}")"
 
 log "waiting for 3x-ui panel"
 selected_root="$(wait_for_any_root "${candidate_roots}")" || {
